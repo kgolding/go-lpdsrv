@@ -15,8 +15,8 @@ import (
 
 type Server struct {
 	conn net.Listener
-	// C emits received jobs
-	C chan Job
+	// Job emits received jobs
+	Job chan Job
 }
 
 const (
@@ -32,7 +32,7 @@ const (
 // New returns and starts a new Server instance on the given local IP/port
 func New(address string) (*Server, error) {
 	s := &Server{
-		C: make(chan Job, 10),
+		Job: make(chan Job, 10),
 	}
 	var err error
 
@@ -45,7 +45,8 @@ func New(address string) (*Server, error) {
 		for {
 			c, err := s.conn.Accept()
 			if err != nil {
-				continue
+				close(s.Job)
+				return
 			}
 			go s.handleConnection(c)
 		}
@@ -61,6 +62,7 @@ func (s *Server) Close() error {
 func (s *Server) handleConnection(c net.Conn) {
 
 	state := STATE_IDLE
+
 	// job holds the currently processed job until it's ready to emit of the C channel
 	job := Job{}
 
@@ -69,18 +71,13 @@ func (s *Server) handleConnection(c net.Conn) {
 	readBuf := make([]byte, 1024*24)
 
 	for {
-		// time.Sleep(time.Second)
-
 		n, err := c.Read(readBuf)
 		if err == io.EOF {
 			if state == STATE_RECEIVE_DATA {
-				// log.Printf("DO MS PRINT JOB:\n\tQue: %s\n\tJob: %s\n\tHost: %s\n %d bytes\n\n%s\n", que, job, host, len(buf), string(buf))
-				c.Write([]byte{ACK}) // ACK
 				c.Write([]byte{ACK}) // ACK
 				c.Close()
 				job.Data = buf
-				s.C <- job
-				job = Job{}
+				s.Job <- job
 			}
 			return
 		} else if err != nil {
@@ -94,6 +91,7 @@ func (s *Server) handleConnection(c net.Conn) {
 		buf = append(buf, readBuf[:n]...)
 
 		dec := decoder.New(buf)
+
 		// function is the first byte which is the linux print daemon protocol function
 		function := dec.Byte()
 
@@ -102,7 +100,6 @@ func (s *Server) handleConnection(c net.Conn) {
 			switch function {
 			case 0x02: // Receive a printer job
 				job.Que = dec.StringByDelimiter(LF)
-				// log.Printf("Receive a printer job for que '%s'\n", que)
 				c.Write([]byte{ACK}) // ACK
 				state = STATE_RECEIVE_JOB
 				buf = dec.PeekRemainingBytes()
@@ -122,7 +119,7 @@ func (s *Server) handleConnection(c net.Conn) {
 					return
 				}
 				if dec.RemainingLength() < count {
-					// log.Println("Waiting for more control file bytes...")
+					// Waiting for more control file bytes
 					c.Write([]byte{ACK}) // ACK
 					continue
 				}
@@ -157,17 +154,18 @@ func (s *Server) handleConnection(c net.Conn) {
 					continue
 				} else {
 					if dec.RemainingLength() < count {
-						// log.Println("Waiting for more file bytes...")
+						// Waiting for more bytes
 						c.Write([]byte{ACK}) // ACK
 						continue
 					}
+					dec.StringByDelimiter(LF) // Name of datafile (dfA)
+
 					data := dec.Bytes(count)
-					// log.Printf("DO MS PRINT JOB:\n\tQue: %s\n\tJob: %s\n\tHost: %s\n %d bytes\n\n%s\n", que, job, host, count, string(data))
 					c.Write([]byte{ACK}) // ACK
 					c.Write([]byte{ACK}) // ACK
 					state = STATE_IDLE
 					job.Data = data
-					s.C <- job
+					s.Job <- job
 					job = Job{}
 				}
 			}
