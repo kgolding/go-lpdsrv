@@ -6,7 +6,6 @@
 package lpdsrv
 
 import (
-	"io"
 	"net"
 	"strconv"
 
@@ -63,7 +62,7 @@ func (s *Server) handleConnection(c net.Conn) {
 
 	state := STATE_IDLE
 
-	// job holds the currently processed job until it's ready to emit of the C channel
+	// job holds the currently processed job until it's ready to emit on the C channel
 	job := Job{}
 
 	// buf holds unprocessed data, and it has readBuf appended to it
@@ -72,15 +71,12 @@ func (s *Server) handleConnection(c net.Conn) {
 
 	for {
 		n, err := c.Read(readBuf)
-		if err == io.EOF {
+		if err != nil {
 			if state == STATE_RECEIVE_DATA {
 				c.Write([]byte{ACK}) // ACK
-				c.Close()
 				job.Data = buf
 				s.Job <- job
 			}
-			return
-		} else if err != nil {
 			c.Close()
 			return
 		}
@@ -125,7 +121,9 @@ func (s *Server) handleConnection(c net.Conn) {
 				}
 
 				if cfa := string(dec.Bytes(3)); cfa != "cfA" {
-					panic("Expected cfA got" + cfa)
+					// Expected cfA
+					c.Close()
+					return
 				}
 				job.Job, _ = strconv.Atoi(string(dec.Bytes(3)))
 
@@ -140,7 +138,7 @@ func (s *Server) handleConnection(c net.Conn) {
 
 			case 0x03: // Receive file
 				countStr := dec.StringByDelimiter(SPACE)
-				count, err := strconv.Atoi(countStr)
+				count, err := strconv.ParseUint(countStr, 10, 64)
 				if err != nil {
 					c.Close()
 					return
@@ -153,15 +151,14 @@ func (s *Server) handleConnection(c net.Conn) {
 					buf = []byte{} // Start with a clean buf
 					continue
 				} else {
-					if dec.RemainingLength() < count {
+					if uint64(dec.RemainingLength()) < count {
 						// Waiting for more bytes
 						c.Write([]byte{ACK}) // ACK
 						continue
 					}
 					dec.StringByDelimiter(LF) // Name of datafile (dfA)
 
-					data := dec.Bytes(count)
-					c.Write([]byte{ACK}) // ACK
+					data := dec.Bytes(int(count))
 					c.Write([]byte{ACK}) // ACK
 					state = STATE_IDLE
 					job.Data = data
